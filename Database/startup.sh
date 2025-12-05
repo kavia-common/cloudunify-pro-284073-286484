@@ -89,7 +89,7 @@ END
 GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
 
 -- Connect to the specific database for schema-level permissions
-\c ${DB_NAME}
+\\c ${DB_NAME}
 
 -- For PostgreSQL 15+, we need to handle public schema permissions differently
 -- First, grant usage on public schema
@@ -124,7 +124,7 @@ GRANT ALL ON SCHEMA public TO ${DB_USER};
 GRANT CREATE ON SCHEMA public TO ${DB_USER};
 
 -- Show current permissions for debugging
-\dn+ public
+\\dn+ public
 EOF
 
     # Save connection command to a file
@@ -152,7 +152,108 @@ echo "To use with Node.js viewer, run: source db_visualizer/postgres.env"
 
 echo "To connect to the database, use one of the following commands:"
 echo "psql -h localhost -U ${DB_USER} -d ${DB_NAME} -p ${DB_PORT}"
-echo "$(cat db_connection.txt)"
+if [ -f "db_connection.txt" ]; then
+  echo "$(cat db_connection.txt)"
+fi
+
+# -----------------------------------------------------------------------------
+# Idempotent schema migrations using DSN from db_connection.txt
+# Each statement is executed individually via psql -c
+# -----------------------------------------------------------------------------
+
+echo ""
+echo "Applying database schema migrations (idempotent)..."
+
+# Ensure db_connection.txt exists; if missing (e.g., server already running), create it
+if [ ! -f "db_connection.txt" ]; then
+  echo "db_connection.txt not found; creating from environment variables..."
+  echo "psql postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}" > db_connection.txt
+fi
+
+# Read the full psql command (must start with 'psql postgresql://...')
+PSQL_CMD="$(cat db_connection.txt | tr -d '\r')"
+
+# Quick connectivity check
+$PSQL_CMD -c "SELECT 1;" >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+  echo "⚠ Failed to connect using db_connection.txt; please verify DSN and server status."
+else
+  echo "✓ Connection verified; running migrations..."
+
+  run_sql() {
+    local sql="$1"
+    echo "  -> $sql"
+    # Execute each SQL statement individually via psql -c
+    $PSQL_CMD -v ON_ERROR_STOP=1 -c "$sql" >/dev/null
+    if [ $? -ne 0 ]; then
+      echo "     ✗ Failed: $sql"
+      return 1
+    else
+      echo "     ✓ Done"
+      return 0
+    fi
+  }
+
+  # NOTE: Avoid extensions to keep non-superuser compatibility.
+  # UUID defaults and CITEXT are intentionally not used to allow running as appuser.
+  # The backend should provide UUID values on insert.
+
+  # organizations table
+  run_sql "CREATE TABLE IF NOT EXISTS organizations (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )"
+
+  # organizations indexes
+  run_sql "CREATE UNIQUE INDEX IF NOT EXISTS organizations_name_lower_uq ON organizations ((lower(name)))"
+  run_sql "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug_lower_uq ON organizations ((lower(slug))) WHERE slug IS NOT NULL"
+
+  # users table
+  run_sql "CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY,
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    password_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT users_role_chk CHECK (role IN ('admin','user','readonly'))
+  )"
+
+  # users indexes and constraints
+  run_sql "CREATE UNIQUE INDEX IF NOT EXISTS users_org_email_lower_uq ON users (organization_id, lower(email))"
+  run_sql "CREATE INDEX IF NOT EXISTS users_org_idx ON users (organization_id)"
+  run_sql "CREATE INDEX IF NOT EXISTS users_role_idx ON users (role)"
+
+  # resources table
+  run_sql "CREATE TABLE IF NOT EXISTS resources (
+    id UUID PRIMARY KEY,
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    tags JSONB NOT NULL DEFAULT '{}'::jsonb,
+    cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT resources_provider_chk CHECK (provider IN ('AWS','Azure','GCP')),
+    CONSTRAINT resources_status_chk CHECK (status IN ('active','inactive','deleted'))
+  )"
+
+  # resources indexes
+  run_sql "CREATE UNIQUE INDEX IF NOT EXISTS resources_org_provider_type_name_uq ON resources (organization_id, provider, type, name)"
+  run_sql "CREATE INDEX IF NOT EXISTS resources_org_idx ON resources (organization_id)"
+  run_sql "CREATE INDEX IF NOT EXISTS resources_provider_idx ON resources (provider)"
+  run_sql "CREATE INDEX IF NOT EXISTS resources_status_idx ON resources (status)"
+  run_sql "CREATE INDEX IF NOT EXISTS resources_tags_gin_idx ON resources USING GIN (tags)"
+
+  echo "✓ Schema migrations complete."
+fi
 
 # -----------------------------------------------------------------------------
 # Optional db_visualizer startup (DISABLED by default)
