@@ -1,6 +1,43 @@
-const express = require('express');
+'use strict';
+
+/**
+ * PUBLIC_INTERFACE
+ * Lightweight database viewer server for local debugging and development.
+ * This service is OPTIONAL and is NOT started by default with the Database container.
+ *
+ * How to enable:
+ *  - Set environment variable DB_VISUALIZER_ENABLED=true before invoking Database/startup.sh
+ *  - Or run manually:
+ *      cd cloudunify-pro-284073-286484/Database/db_visualizer
+ *      npm install --omit=dev
+ *      node server.js --host 0.0.0.0
+ *
+ * Environment variables supported by adapters (can be provided via postgres.env/mysql.env/sqlite.env/mongodb.env):
+ *  - PostgreSQL: POSTGRES_URL, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_PORT
+ *  - MySQL:     MYSQL_URL, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB, MYSQL_PORT
+ *  - SQLite:    SQLITE_DB
+ *  - MongoDB:   MONGODB_URL, MONGODB_DB
+ */
+
 const path = require('path');
 const fs = require('fs');
+
+// Attempt to load express gracefully and provide actionable hints if missing
+let express;
+try {
+  // Correct usage: express is a package, not a relative import
+  express = require('express');
+} catch (err) {
+  if (err && err.code === 'MODULE_NOT_FOUND') {
+    console.error('[db_visualizer] MODULE_NOT_FOUND: "express" package is not installed.');
+    console.error('[db_visualizer] This viewer is optional and not required for PostgreSQL to run.');
+    console.error('[db_visualizer] To enable the viewer, install dependencies:');
+    console.error('    cd cloudunify-pro-284073-286484/Database/db_visualizer && npm install --omit=dev');
+    console.error('[db_visualizer] Or set DB_VISUALIZER_ENABLED=true before running Database/startup.sh to auto-install and launch.');
+    process.exit(1);
+  }
+  throw err;
+}
 
 // Database clients
 const { Pool } = require('pg');
@@ -9,12 +46,23 @@ const sqlite3 = require('sqlite3').verbose();
 const { MongoClient } = require('mongodb');
 
 const app = express();
-app.use((req, res, next) => {
-  // Set headers to allow embedding in iframes
-  res.setHeader('X-Frame-Options', 'ALLOWALL');
-  res.setHeader('Content-Security-Policy', "frame-ancestors *;");
 
-  // CORS headers
+// Basic CLI arg parsing (no external deps)
+function getArgValue(name, defaultValue) {
+  const idx = process.argv.indexOf(name);
+  if (idx !== -1 && process.argv[idx + 1] && !process.argv[idx + 1].startsWith('--')) {
+    return process.argv[idx + 1];
+  }
+  return defaultValue;
+}
+
+// Middleware and static assets
+app.use((req, res, next) => {
+  // Allow embedding in iframes (for internal tools only)
+  res.setHeader('X-Frame-Options', 'ALLOWALL');
+  res.setHeader('Content-Security-Policy', 'frame-ancestors *;');
+
+  // CORS headers (for local tooling convenience)
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,PATCH,OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
@@ -25,19 +73,19 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Load environment variables from .env files
+// Load environment variables from .env-like files (bash export format)
 function loadEnvFiles() {
   const envFiles = ['postgres', 'mysql', 'sqlite', 'mongodb'];
   const allEnvVars = {};
-  
+
   envFiles.forEach(dbType => {
     const filePath = `${dbType}.env`;
     if (!fs.existsSync(filePath)) return;
-    
+
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       let varsLoaded = 0;
-      
+
       content.split('\n').forEach(line => {
         const trimmed = line.trim();
         if (trimmed && trimmed.startsWith('export ')) {
@@ -45,7 +93,7 @@ function loadEnvFiles() {
           const [key, ...valueParts] = exportLine.split('=');
           if (key && valueParts.length > 0) {
             let value = valueParts.join('=');
-            if ((value.startsWith('"') && value.endsWith('"')) || 
+            if ((value.startsWith('"') && value.endsWith('"')) ||
                 (value.startsWith("'") && value.endsWith("'"))) {
               value = value.slice(1, -1);
             }
@@ -54,19 +102,19 @@ function loadEnvFiles() {
           }
         }
       });
-      
+
       console.log(`✓ ${filePath} loaded (${varsLoaded} variables)`);
     } catch (error) {
       console.log(`✗ Error loading ${filePath}:`, error.message);
     }
   });
-  
+
   return { ...process.env, ...allEnvVars };
 }
 
 const env = loadEnvFiles();
 
-// Database configuration builder
+// Database configuration builders
 const dbConfigBuilders = {
   postgres: (env) => env.POSTGRES_URL ? {
     host: 'localhost',
@@ -75,7 +123,7 @@ const dbConfigBuilders = {
     password: env.POSTGRES_PASSWORD || '',
     database: env.POSTGRES_DB || 'postgres'
   } : null,
-  
+
   mysql: (env) => env.MYSQL_URL ? {
     host: 'localhost',
     port: env.MYSQL_PORT || 3306,
@@ -83,9 +131,9 @@ const dbConfigBuilders = {
     password: env.MYSQL_PASSWORD || '',
     database: env.MYSQL_DB || 'mysql'
   } : null,
-  
+
   sqlite: (env) => env.SQLITE_DB ? { path: env.SQLITE_DB } : null,
-  
+
   mongodb: (env) => env.MONGODB_URL ? {
     url: env.MONGODB_URL,
     database: env.MONGODB_DB || 'test'
@@ -104,19 +152,19 @@ class DatabaseAdapter {
     this.type = type;
     this.config = config;
   }
-  
+
   async testConnection() {
     throw new Error('Not implemented');
   }
-  
+
   async getTables() {
     throw new Error('Not implemented');
   }
-  
+
   async getData(table, limit) {
     throw new Error('Not implemented');
   }
-  
+
   // Helper for consistent table format
   formatTableResult(rows, columnName = 'table_name') {
     return rows.map(row => ({
@@ -130,24 +178,24 @@ class SQLAdapter extends DatabaseAdapter {
   async execute(query) {
     throw new Error('Not implemented');
   }
-  
+
   async testConnection() {
     await this.execute('SELECT 1');
   }
-  
+
   getTableQuery() {
     throw new Error('Not implemented');
   }
-  
+
   getDataQuery(table, limit) {
     throw new Error('Not implemented');
   }
-  
+
   async getTables() {
     const rows = await this.execute(this.getTableQuery());
     return this.formatTableResult(rows);
   }
-  
+
   async getData(table, limit) {
     return await this.execute(this.getDataQuery(table, limit));
   }
@@ -164,11 +212,11 @@ class PostgresAdapter extends SQLAdapter {
       await pool.end();
     }
   }
-  
+
   getTableQuery() {
     return "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'";
   }
-  
+
   getDataQuery(table, limit) {
     return `SELECT * FROM "${table}" LIMIT ${limit}`;
   }
@@ -185,11 +233,11 @@ class MySQLAdapter extends SQLAdapter {
       await connection.end();
     }
   }
-  
+
   getTableQuery() {
     return 'SHOW TABLES';
   }
-  
+
   getDataQuery(table, limit) {
     return `SELECT * FROM \`${table}\` LIMIT ${limit}`;
   }
@@ -207,17 +255,17 @@ class SQLiteAdapter extends SQLAdapter {
       });
     });
   }
-  
+
   async testConnection() {
     if (!fs.existsSync(this.config.path)) {
       throw new Error('SQLite database file not found');
     }
   }
-  
+
   getTableQuery() {
     return "SELECT name as table_name FROM sqlite_master WHERE type='table'";
   }
-  
+
   getDataQuery(table, limit) {
     return `SELECT * FROM "${table}" LIMIT ${limit}`;
   }
@@ -235,18 +283,18 @@ class MongoDBAdapter extends DatabaseAdapter {
       await client.close();
     }
   }
-  
+
   async testConnection() {
     await this.withClient(() => {});
   }
-  
+
   async getTables() {
     return await this.withClient(async (db) => {
       const collections = await db.listCollections().toArray();
       return this.formatTableResult(collections, 'name');
     });
   }
-  
+
   async getData(table, limit) {
     return await this.withClient(async (db) => {
       return await db.collection(table).find({}).limit(limit).toArray();
@@ -271,13 +319,13 @@ const adapters = Object.entries(configs).reduce((acc, [db, config]) => {
 // Test database connections
 async function testConnections() {
   const available = [];
-  
+
   for (const [name, adapter] of Object.entries(adapters)) {
     if (!adapter) {
       console.log(`- ${name}: not configured`);
       continue;
     }
-    
+
     try {
       console.log(`Testing ${name} connection...`);
       await adapter.testConnection();
@@ -290,7 +338,7 @@ async function testConnections() {
       }
     }
   }
-  
+
   return available;
 }
 
@@ -301,7 +349,7 @@ async function handleApiRequest(req, res, operation) {
     if (!adapter) {
       throw new Error(`${req.params.db} not configured`);
     }
-    
+
     const result = await operation(adapter);
     res.json(result);
   } catch (error) {
@@ -309,19 +357,33 @@ async function handleApiRequest(req, res, operation) {
   }
 }
 
-// API Routes
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/databases
+ * Returns the list of available databases that can be connected to based on current env.
+ */
 app.get('/api/databases', async (req, res) => {
   const available = await testConnections();
   res.json(available);
 });
 
-app.get('/api/:db/tables', (req, res) => 
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/:db/tables
+ * Lists tables/collections for the given db (postgres, mysql, sqlite, mongodb)
+ */
+app.get('/api/:db/tables', (req, res) =>
   handleApiRequest(req, res, adapter => adapter.getTables())
 );
 
-app.get('/api/:db/tables/:table/data', (req, res) => 
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/:db/tables/:table/data?limit=50
+ * Returns data for a given table/collection with an optional limit (default 50).
+ */
+app.get('/api/:db/tables/:table/data', (req, res) =>
   handleApiRequest(req, res, adapter => {
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = parseInt(req.query.limit, 10) || 50;
     return adapter.getData(req.params.table, limit);
   })
 );
@@ -338,9 +400,12 @@ const envInfo = {
   MongoDB: 'MONGODB_URL, MONGODB_DB'
 };
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Database viewer running on http://localhost:${PORT}`);
+const HOST = getArgValue('--host', process.env.HOST || 'localhost');
+const PORT = parseInt(process.env.PORT || '3000', 10);
+
+// Start server
+app.listen(PORT, HOST, () => {
+  console.log(`Database viewer running on http://${HOST}:${PORT}`);
   console.log('\nEnvironment variables expected:');
   Object.entries(envInfo).forEach(([db, vars]) => {
     console.log(`${db}: ${vars}`);

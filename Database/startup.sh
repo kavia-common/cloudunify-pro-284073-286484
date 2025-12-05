@@ -31,52 +31,50 @@ if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
     
     echo ""
     echo "Script stopped - server already running."
-    exit 0
-fi
-
-# Also check if there's a PostgreSQL process running (in case pg_isready fails)
-if pgrep -f "postgres.*-p ${DB_PORT}" > /dev/null 2>&1; then
-    echo "Found existing PostgreSQL process on port ${DB_PORT}"
-    echo "Attempting to verify connection..."
-    
-    # Try to connect and verify the database exists
-    if sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -c '\q' 2>/dev/null; then
-        echo "Database ${DB_NAME} is accessible."
-        echo "Script stopped - server already running."
-        exit 0
+    # Even when already running, we continue to handle optional viewer (below)
+else
+    # Also check if there's a PostgreSQL process running (in case pg_isready fails)
+    if pgrep -f "postgres.*-p ${DB_PORT}" > /dev/null 2>&1; then
+        echo "Found existing PostgreSQL process on port ${DB_PORT}"
+        echo "Attempting to verify connection..."
+        
+        # Try to connect and verify the database exists
+        if sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -c '\q' 2>/dev/null; then
+            echo "Database ${DB_NAME} is accessible."
+            echo "Script stopped - server already running."
+        fi
     fi
-fi
 
-# Initialize PostgreSQL data directory if it doesn't exist
-if [ ! -f "/var/lib/postgresql/data/PG_VERSION" ]; then
-    echo "Initializing PostgreSQL..."
-    sudo -u postgres ${PG_BIN}/initdb -D /var/lib/postgresql/data
-fi
-
-# Start PostgreSQL server in background
-echo "Starting PostgreSQL server..."
-sudo -u postgres ${PG_BIN}/postgres -D /var/lib/postgresql/data -p ${DB_PORT} &
-
-# Wait for PostgreSQL to start
-echo "Waiting for PostgreSQL to start..."
-sleep 5
-
-# Check if PostgreSQL is running
-for i in {1..15}; do
-    if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
-        echo "PostgreSQL is ready!"
-        break
+    # Initialize PostgreSQL data directory if it doesn't exist
+    if [ ! -f "/var/lib/postgresql/data/PG_VERSION" ]; then
+        echo "Initializing PostgreSQL..."
+        sudo -u postgres ${PG_BIN}/initdb -D /var/lib/postgresql/data
     fi
-    echo "Waiting... ($i/15)"
-    sleep 2
-done
 
-# Create database and user
-echo "Setting up database and user..."
-sudo -u postgres ${PG_BIN}/createdb -p ${DB_PORT} ${DB_NAME} 2>/dev/null || echo "Database might already exist"
+    # Start PostgreSQL server in background
+    echo "Starting PostgreSQL server..."
+    sudo -u postgres ${PG_BIN}/postgres -D /var/lib/postgresql/data -p ${DB_PORT} &
 
-# Set up user and permissions with proper schema ownership
-sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d postgres << EOF
+    # Wait for PostgreSQL to start
+    echo "Waiting for PostgreSQL to start..."
+    sleep 5
+
+    # Check if PostgreSQL is running
+    for i in {1..15}; do
+        if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
+            echo "PostgreSQL is ready!"
+            break
+        fi
+        echo "Waiting... ($i/15)"
+        sleep 2
+    done
+
+    # Create database and user
+    echo "Setting up database and user..."
+    sudo -u postgres ${PG_BIN}/createdb -p ${DB_PORT} ${DB_NAME} 2>/dev/null || echo "Database might already exist"
+
+    # Set up user and permissions with proper schema ownership
+    sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d postgres << EOF
 -- Create user if doesn't exist
 DO \$\$
 BEGIN
@@ -119,8 +117,8 @@ GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};
 GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO ${DB_USER};
 EOF
 
-# Additionally, connect to the specific database to ensure permissions
-sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} << EOF
+    # Additionally, connect to the specific database to ensure permissions
+    sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} << EOF
 -- Double-check permissions are set correctly in the target database
 GRANT ALL ON SCHEMA public TO ${DB_USER};
 GRANT CREATE ON SCHEMA public TO ${DB_USER};
@@ -129,12 +127,12 @@ GRANT CREATE ON SCHEMA public TO ${DB_USER};
 \dn+ public
 EOF
 
-# Save connection command to a file
-echo "psql postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}" > db_connection.txt
-echo "Connection string saved to db_connection.txt"
+    # Save connection command to a file
+    echo "psql postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}" > db_connection.txt
+    echo "Connection string saved to db_connection.txt"
 
-# Save environment variables to a file
-cat > db_visualizer/postgres.env << EOF
+    # Save environment variables to a file
+    cat > db_visualizer/postgres.env << EOF
 export POSTGRES_URL="postgresql://localhost:${DB_PORT}/${DB_NAME}"
 export POSTGRES_USER="${DB_USER}"
 export POSTGRES_PASSWORD="${DB_PASSWORD}"
@@ -142,11 +140,12 @@ export POSTGRES_DB="${DB_NAME}"
 export POSTGRES_PORT="${DB_PORT}"
 EOF
 
-echo "PostgreSQL setup complete!"
-echo "Database: ${DB_NAME}"
-echo "User: ${DB_USER}"
-echo "Port: ${DB_PORT}"
-echo ""
+    echo "PostgreSQL setup complete!"
+    echo "Database: ${DB_NAME}"
+    echo "User: ${DB_USER}"
+    echo "Port: ${DB_PORT}"
+    echo ""
+fi
 
 echo "Environment variables saved to db_visualizer/postgres.env"
 echo "To use with Node.js viewer, run: source db_visualizer/postgres.env"
@@ -154,3 +153,51 @@ echo "To use with Node.js viewer, run: source db_visualizer/postgres.env"
 echo "To connect to the database, use one of the following commands:"
 echo "psql -h localhost -U ${DB_USER} -d ${DB_NAME} -p ${DB_PORT}"
 echo "$(cat db_connection.txt)"
+
+# -----------------------------------------------------------------------------
+# Optional db_visualizer startup (DISABLED by default)
+# Set DB_VISUALIZER_ENABLED=true in the environment prior to running this script
+# to auto-install dependencies and start the viewer in the background.
+# -----------------------------------------------------------------------------
+if [ "${DB_VISUALIZER_ENABLED:-false}" = "true" ]; then
+    echo ""
+    echo "[db_visualizer] DB_VISUALIZER_ENABLED=true -> preparing to start viewer..."
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        cd db_visualizer || {
+            echo "[db_visualizer] Could not cd into db_visualizer directory"; 
+            exit 0; 
+        }
+
+        # Load postgres.env if present for convenience
+        if [ -f "postgres.env" ]; then
+            set -a
+            # shellcheck disable=SC1091
+            . ./postgres.env
+            set +a
+        fi
+
+        # Install dependencies if express is missing or node_modules is absent
+        if [ ! -d "node_modules" ] || [ ! -f "node_modules/express/package.json" ]; then
+            echo "[db_visualizer] Installing dependencies (omit dev)..."
+            npm install --omit=dev --no-audit --no-fund --silent || {
+                echo "[db_visualizer] npm install failed; viewer will not be started."
+                exit 0
+            }
+        fi
+
+        # Start viewer in the background, bind to all interfaces
+        mkdir -p ../logs
+        echo "[db_visualizer] Starting viewer on 0.0.0.0:${PORT:-3000} ..."
+        nohup node server.js --host 0.0.0.0 > ../logs/db_visualizer.log 2>&1 &
+        echo "[db_visualizer] Started. Logs: Database/logs/db_visualizer.log"
+    else
+        echo "[db_visualizer] Node.js and npm not found; skipping viewer startup."
+    fi
+else
+    echo ""
+    echo "[db_visualizer] Viewer is disabled by default. To enable set DB_VISUALIZER_ENABLED=true"
+    echo "[db_visualizer] Then re-run this script, or start manually:"
+    echo "    cd cloudunify-pro-284073-286484/Database/db_visualizer"
+    echo "    npm install --omit=dev"
+    echo "    node server.js --host 0.0.0.0"
+fi
